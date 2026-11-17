@@ -22,7 +22,8 @@ jobs:
 
       - name: Installazione delle dipendenze
         run: |
-          pip install requests beautifulsoup4
+          python -m pip install --upgrade pip
+          pip install curl_cffi beautifulsoup4
 
       - name: Esecuzione dello script di scraping
         env:
