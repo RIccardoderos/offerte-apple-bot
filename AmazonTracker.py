@@ -1,9 +1,9 @@
 import os
+import re
 import time
 import random
 from curl_cffi import requests
 from bs4 import BeautifulSoup
-import re 
 
 # Configurazioni Telegram lette in sicurezza dalle Secrets di GitHub
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -14,7 +14,7 @@ PRODOTTI_APPLE = [
     {
         "nome": "MacBook Air M5",
         "url": "https://www.amazon.it/dp/B0GR1NGNSB",
-        "prezzo_target": 1500.00
+        "prezzo_target": 1550.00
     },
     {
         "nome": "iPad A16",
@@ -35,7 +35,7 @@ PRODOTTI_APPLE = [
 
 def send_telegram_message(text):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("Errore: TELEGRAM_TOKEN o CHAT_ID non impostati nelle variabili d'ambiente.")
+        print("Errore: TELEGRAM_TOKEN o CHAT_ID non impostati.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -49,20 +49,18 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"Errore nell'invio a Telegram: {e}")
 
-import re
-
 def estrai_prezzo(soup, html_text):
-    # 1. Selettori CSS standard e mobile
+    # 1. Selettori CSS (sia desktop che mobile /gp/aw/d/)
     selettori_prezzo = [
         "#corePriceDisplay_desktop_feature_div span.a-price span.a-offscreen",
         "#corePrice_feature_div span.a-price span.a-offscreen",
         "#tp_price_block_total_price_ww span.a-offscreen",
         ".apexPriceToPay span.a-offscreen",
+        "#priceblock_ourprice",
         "#price_inside_buybox",
         "#newBuyBoxPrice",
-        "#buybox span.a-price span.a-offscreen",
         "#olp_feature_div span.a-color-price",
-        "#gestalt_feature_div span.a-price span.a-offscreen"
+        "span.a-price span.a-offscreen"
     ]
 
     for selettore in selettori_prezzo:
@@ -71,92 +69,60 @@ def estrai_prezzo(soup, html_text):
             testo_pulito = re.sub(r'[^\d,]', '', elemento.text.strip()).replace(',', '.')
             try:
                 valore = float(testo_pulito)
-                if valore > 0:
+                if valore > 50:
                     return valore
             except ValueError:
                 continue
 
-    # 2. Estrazione diretta dai metadati JSON interni di Amazon (aggira il blocco grafico Buy Box USA)
-    pattern_json = [
-        r'"priceAmount"\s*:\s*([0-9]+\.[0-9]{2})',
-        r'"buyingPrice"\s*:\s*([0-9]+\.[0-9]{2})',
-        r'"displayPrice"\s*:\s*"([0-9\.]+,[0-9]{2})\s*€"'
-    ]
-    for pattern in pattern_json:
+    # 2. Fallback classico su a-price-whole + a-price-fraction (quello che funzionava per la PS5)
+    price_element = soup.find("span", {"class": "a-price-whole"})
+    fraction_element = soup.find("span", {"class": "a-price-fraction"})
+    if price_element:
+        price_str = re.sub(r'\D', '', price_element.text)
+        fraction_str = re.sub(r'\D', '', fraction_element.text) if fraction_element else "00"
+        if price_str:
+            valore = float(f"{price_str}.{fraction_str}")
+            if valore > 50:
+                return valore
+
+    # 3. Ricerca nei metadati JSON nascosti
+    for pattern in [r'"priceAmount"\s*:\s*([0-9]+\.[0-9]{2})', r'"buyingPrice"\s*:\s*([0-9]+\.[0-9]{2})']:
         match = re.search(pattern, html_text)
         if match:
-            val_str = match.group(1).replace('.', '').replace(',', '.') if ',' in match.group(1) else match.group(1)
             try:
-                valore = float(val_str)
-                if valore > 50:  # Evita falsi positivi come costi di spedizione
+                valore = float(match.group(1))
+                if valore > 50:
                     return valore
             except ValueError:
                 continue
 
     return None
 
-def imposta_cap_italiano(session, headers):
-    """Imposta il CAP 33100 (Udine/Italia) nella sessione Amazon per sbloccare i prezzi Apple dagli IP USA di GitHub."""
-    try:
-        # 1. Visita la home per inizializzare i cookie di sessione
-        home_resp = session.get("https://www.amazon.it/", headers=headers, timeout=15)
-        time.sleep(random.uniform(1.5, 3))
-
-        # 2. Estrae il token anti-CSRF richiesto da Amazon per cambiare CAP
-        token_match = re.search(r'"anti-csrftoken-a2z"\s*:\s*"([^"]+)"', home_resp.text)
-        csrf_headers = headers.copy()
-        csrf_headers.update({
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Origin": "https://www.amazon.it",
-            "Referer": "https://www.amazon.it/",
-            "X-Requested-With": "XMLHttpRequest",
-        })
-        if token_match:
-            csrf_headers["anti-csrftoken-a2z"] = token_match.group(1)
-
-        # 3. Invia la richiesta POST all'endpoint ufficiale di cambio indirizzo di Amazon.it
-        payload = {
-            "locationType": "LOCATION_INPUT",
-            "zipCode": "33100",
-            "storeContext": "generic",
-            "deviceType": "web",
-            "pageType": "Gateway",
-            "actionSource": "glow"
-        }
-        session.post(
-            "https://www.amazon.it/portal-migration/hz/glow/address-change?actionSource=glow",
-            data=payload,
-            headers=csrf_headers,
-            timeout=15
-        )
-        time.sleep(random.uniform(1.5, 3))
-    except Exception as e:
-        print(f"Avviso impostazione CAP italiano: {e}")
-
 def check_amazon_prices():
     headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "it-IT,it;q=0.9",
-        "Referer": "https://www.google.it/",
-        "Upgrade-Insecure-Requests": "1"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.google.it/"
     }
 
     with requests.Session(impersonate="chrome") as session:
-        # Imposta direttamente il cookie della valuta/paese per Amazon.it
-        session.cookies.set("i18n-prefs", "EUR", domain=".amazon.it")
-        session.cookies.set("lc-acbit", "it_IT", domain=".amazon.it")
-
         for prodotto in PRODOTTI_APPLE:
             print(f"Controllo in corso per: {prodotto['nome']}...")
-            
+            asin_match = re.search(r'/dp/([A-Z0-9]{10})', prodotto["url"])
+            asin = asin_match.group(1) if asin_match else ""
+
             try:
-                # Aggiunge ?th=1&psc=1 per forzare il caricamento della variante specifica
-                url_variante = f"{prodotto['url']}?th=1&psc=1"
-                response = session.get(url_variante, headers=headers, timeout=15)
+                # Tentativo 1: URL standard pulito
+                response = session.get(prodotto["url"], headers=headers, timeout=15)
                 soup = BeautifulSoup(response.content, "html.parser")
-                
                 current_price = estrai_prezzo(soup, response.text)
+
+                # Tentativo 2: Se non trova il prezzo (es. blocco geografico Apple), prova l'endpoint mobile /gp/aw/d/
+                if current_price is None and asin:
+                    mobile_url = f"https://www.amazon.it/gp/aw/d/{asin}"
+                    resp_mob = session.get(mobile_url, headers=headers, timeout=15)
+                    soup_mob = BeautifulSoup(resp_mob.content, "html.parser")
+                    current_price = estrai_prezzo(soup_mob, resp_mob.text)
 
                 if current_price is not None:
                     print(f"[{time.strftime('%H:%M:%S')}] Prezzo attuale: {current_price}€ (Target: {prodotto['prezzo_target']}€)")
@@ -177,7 +143,7 @@ def check_amazon_prices():
                 print(f"Errore durante lo scraping di {prodotto['nome']}: {e}")
             
             time.sleep(random.uniform(5, 9))
-            
+
 if __name__ == "__main__":
     print("Avvio scansione singola prodotti per GitHub Actions...")
     check_amazon_prices()
