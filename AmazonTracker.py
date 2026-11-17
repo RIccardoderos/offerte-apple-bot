@@ -51,8 +51,8 @@ def send_telegram_message(text):
 
 import re
 
-def estrai_prezzo(soup):
-    # Lista ordinata di tutti i possibili selettori CSS usati da Amazon.it per il prezzo
+def estrai_prezzo(soup, html_text):
+    # 1. Selettori CSS standard e mobile
     selettori_prezzo = [
         "#corePriceDisplay_desktop_feature_div span.a-price span.a-offscreen",
         "#corePrice_feature_div span.a-price span.a-offscreen",
@@ -61,14 +61,13 @@ def estrai_prezzo(soup):
         "#price_inside_buybox",
         "#newBuyBoxPrice",
         "#buybox span.a-price span.a-offscreen",
-        "#olp_feature_div span.a-color-price",  # Box "Nuovo da X €" quando la Buy Box principale è nascosta
+        "#olp_feature_div span.a-color-price",
         "#gestalt_feature_div span.a-price span.a-offscreen"
     ]
 
     for selettore in selettori_prezzo:
         elemento = soup.select_one(selettore)
         if elemento and elemento.text.strip():
-            # Pulisce il testo (es. "1.299,00 €" -> "1299.00")
             testo_pulito = re.sub(r'[^\d,]', '', elemento.text.strip()).replace(',', '.')
             try:
                 valore = float(testo_pulito)
@@ -77,14 +76,22 @@ def estrai_prezzo(soup):
             except ValueError:
                 continue
 
-    # Fallback classico su a-price-whole + a-price-fraction
-    price_element = soup.find("span", {"class": "a-price-whole"})
-    fraction_element = soup.find("span", {"class": "a-price-fraction"})
-    if price_element:
-        price_str = re.sub(r'\D', '', price_element.text)
-        fraction_str = re.sub(r'\D', '', fraction_element.text) if fraction_element else "00"
-        if price_str:
-            return float(f"{price_str}.{fraction_str}")
+    # 2. Estrazione diretta dai metadati JSON interni di Amazon (aggira il blocco grafico Buy Box USA)
+    pattern_json = [
+        r'"priceAmount"\s*:\s*([0-9]+\.[0-9]{2})',
+        r'"buyingPrice"\s*:\s*([0-9]+\.[0-9]{2})',
+        r'"displayPrice"\s*:\s*"([0-9\.]+,[0-9]{2})\s*€"'
+    ]
+    for pattern in pattern_json:
+        match = re.search(pattern, html_text)
+        if match:
+            val_str = match.group(1).replace('.', '').replace(',', '.') if ',' in match.group(1) else match.group(1)
+            try:
+                valore = float(val_str)
+                if valore > 50:  # Evita falsi positivi come costi di spedizione
+                    return valore
+            except ValueError:
+                continue
 
     return None
 
@@ -130,42 +137,26 @@ def imposta_cap_italiano(session, headers):
 def check_amazon_prices():
     headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Language": "it-IT,it;q=0.9",
         "Referer": "https://www.google.it/",
         "Upgrade-Insecure-Requests": "1"
     }
 
     with requests.Session(impersonate="chrome") as session:
-        # Imposta la posizione di consegna in Italia prima di controllare i prodotti Apple
-        imposta_cap_italiano(session, headers)
+        # Imposta direttamente il cookie della valuta/paese per Amazon.it
+        session.cookies.set("i18n-prefs", "EUR", domain=".amazon.it")
+        session.cookies.set("lc-acbit", "it_IT", domain=".amazon.it")
 
         for prodotto in PRODOTTI_APPLE:
             print(f"Controllo in corso per: {prodotto['nome']}...")
             
             try:
-                response = session.get(prodotto["url"], headers=headers, timeout=15)
+                # Aggiunge ?th=1&psc=1 per forzare il caricamento della variante specifica
+                url_variante = f"{prodotto['url']}?th=1&psc=1"
+                response = session.get(url_variante, headers=headers, timeout=15)
                 soup = BeautifulSoup(response.content, "html.parser")
                 
-                current_price = estrai_prezzo(soup)
-
-                # Fallback extra: se Amazon nasconde ancora la Buy Box Apple, interroga direttamente il pannello "Tutte le opzioni di acquisto" (AOD)
-                if current_price is None:
-                    asin_match = re.search(r'/dp/([A-Z0-9]{10})', prodotto["url"])
-                    if asin_match:
-                        asin = asin_match.group(1)
-                        aod_url = f"https://www.amazon.it/gp/product/ajax/ref=dp_aod_ALL_mbc?asin={asin}&m=&qid=&smid=&sourcecustomerorglistid=&sourcecustomerorglistitemid=&sr=&pc=dp&experienceId=aodAjaxMain"
-                        aod_resp = session.get(aod_url, headers=headers, timeout=15)
-                        if aod_resp.status_code == 200:
-                            aod_soup = BeautifulSoup(aod_resp.content, "html.parser")
-                            aod_price = aod_soup.select_one("#aod-price-1 span.a-offscreen, #aod-price-0 span.a-offscreen, .aod-information-block span.a-offscreen")
-                            if aod_price:
-                                testo_pulito = re.sub(r'[^\d,]', '', aod_price.text.strip()).replace(',', '.')
-                                try:
-                                    valore = float(testo_pulito)
-                                    if valore > 0:
-                                        current_price = valore
-                                except ValueError:
-                                    pass
+                current_price = estrai_prezzo(soup, response.text)
 
                 if current_price is not None:
                     print(f"[{time.strftime('%H:%M:%S')}] Prezzo attuale: {current_price}€ (Target: {prodotto['prezzo_target']}€)")
@@ -185,7 +176,7 @@ def check_amazon_prices():
             except Exception as e:
                 print(f"Errore durante lo scraping di {prodotto['nome']}: {e}")
             
-            time.sleep(random.uniform(5, 10))
+            time.sleep(random.uniform(5, 9))
             
 if __name__ == "__main__":
     print("Avvio scansione singola prodotti per GitHub Actions...")
