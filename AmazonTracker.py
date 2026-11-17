@@ -5,16 +5,14 @@ import random
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 
-# Configurazioni Telegram lette in sicurezza dalle Secrets di GitHub
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# Lista dei prodotti da monitorare
 PRODOTTI_APPLE = [
     {
         "nome": "MacBook Air M5",
         "url": "https://www.amazon.it/dp/B0GR1NGNSB",
-        "prezzo_target": 1550.00
+        "prezzo_target": 1250.00
     },
     {
         "nome": "iPad A16",
@@ -29,7 +27,7 @@ PRODOTTI_APPLE = [
     {
         "nome": "PS5 con 2 controller",
         "url": "https://www.amazon.it/dp/B0CLT54ZNZ",
-        "prezzo_target": 900.00
+        "prezzo_target": 400.00
     }
 ]
 
@@ -49,53 +47,57 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"Errore nell'invio a Telegram: {e}")
 
-def estrai_prezzo(soup, html_text):
-    # 1. Selettori CSS (sia desktop che mobile /gp/aw/d/)
-    selettori_prezzo = [
+def pulisci_prezzo(testo):
+    if not testo:
+        return None
+    testo_pulito = re.sub(r'[^\d,]', '', testo.strip()).replace(',', '.')
+    try:
+        valore = float(testo_pulito)
+        return valore if valore > 50 else None
+    except ValueError:
+        return None
+
+def estrai_prezzo_pagina(soup):
+    selettori = [
         "#corePriceDisplay_desktop_feature_div span.a-price span.a-offscreen",
         "#corePrice_feature_div span.a-price span.a-offscreen",
         "#tp_price_block_total_price_ww span.a-offscreen",
         ".apexPriceToPay span.a-offscreen",
-        "#priceblock_ourprice",
         "#price_inside_buybox",
-        "#newBuyBoxPrice",
-        "#olp_feature_div span.a-color-price",
-        "span.a-price span.a-offscreen"
+        "#newBuyBoxPrice"
     ]
-
-    for selettore in selettori_prezzo:
+    for selettore in selettori:
         elemento = soup.select_one(selettore)
-        if elemento and elemento.text.strip():
-            testo_pulito = re.sub(r'[^\d,]', '', elemento.text.strip()).replace(',', '.')
-            try:
-                valore = float(testo_pulito)
-                if valore > 50:
-                    return valore
-            except ValueError:
-                continue
-
-    # 2. Fallback classico su a-price-whole + a-price-fraction (quello che funzionava per la PS5)
-    price_element = soup.find("span", {"class": "a-price-whole"})
-    fraction_element = soup.find("span", {"class": "a-price-fraction"})
-    if price_element:
-        price_str = re.sub(r'\D', '', price_element.text)
-        fraction_str = re.sub(r'\D', '', fraction_element.text) if fraction_element else "00"
-        if price_str:
-            valore = float(f"{price_str}.{fraction_str}")
-            if valore > 50:
+        if elemento:
+            valore = pulisci_prezzo(elemento.text)
+            if valore:
                 return valore
 
-    # 3. Ricerca nei metadati JSON nascosti
-    for pattern in [r'"priceAmount"\s*:\s*([0-9]+\.[0-9]{2})', r'"buyingPrice"\s*:\s*([0-9]+\.[0-9]{2})']:
-        match = re.search(pattern, html_text)
-        if match:
-            try:
-                valore = float(match.group(1))
-                if valore > 50:
-                    return valore
-            except ValueError:
-                continue
+    price_whole = soup.find("span", {"class": "a-price-whole"})
+    price_fraction = soup.find("span", {"class": "a-price-fraction"})
+    if price_whole:
+        w = re.sub(r'\D', '', price_whole.text)
+        f = re.sub(r'\D', '', price_fraction.text) if price_fraction else "00"
+        if w:
+            valore = float(f"{w}.{f}")
+            if valore > 50:
+                return valore
+    return None
 
+def estrai_prezzo_ricerca_asin(session, asin, headers):
+    """Aggira il blocco geografico USA sui prodotti Apple leggendo il prezzo dalla ricerca per ASIN."""
+    search_url = f"https://www.amazon.it/s?k={asin}"
+    resp = session.get(search_url, headers=headers, timeout=15)
+    if resp.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(resp.content, "html.parser")
+    # Cerca il blocco risultato con l'attributo data-asin esatto
+    card = soup.select_one(f'div[data-asin="{asin}"]')
+    if card:
+        prezzo_el = card.select_one("span.a-price span.a-offscreen")
+        if prezzo_el:
+            return pulisci_prezzo(prezzo_el.text)
     return None
 
 def check_amazon_prices():
@@ -112,17 +114,14 @@ def check_amazon_prices():
             asin = asin_match.group(1) if asin_match else ""
 
             try:
-                # Tentativo 1: URL standard pulito
                 response = session.get(prodotto["url"], headers=headers, timeout=15)
                 soup = BeautifulSoup(response.content, "html.parser")
-                current_price = estrai_prezzo(soup, response.text)
+                current_price = estrai_prezzo_pagina(soup)
 
-                # Tentativo 2: Se non trova il prezzo (es. blocco geografico Apple), prova l'endpoint mobile /gp/aw/d/
+                # Se Amazon nasconde il prezzo Apple nella pagina prodotto (IP USA), legge dalla ricerca ASIN
                 if current_price is None and asin:
-                    mobile_url = f"https://www.amazon.it/gp/aw/d/{asin}"
-                    resp_mob = session.get(mobile_url, headers=headers, timeout=15)
-                    soup_mob = BeautifulSoup(resp_mob.content, "html.parser")
-                    current_price = estrai_prezzo(soup_mob, resp_mob.text)
+                    time.sleep(random.uniform(2, 4))
+                    current_price = estrai_prezzo_ricerca_asin(session, asin, headers)
 
                 if current_price is not None:
                     print(f"[{time.strftime('%H:%M:%S')}] Prezzo attuale: {current_price}€ (Target: {prodotto['prezzo_target']}€)")
