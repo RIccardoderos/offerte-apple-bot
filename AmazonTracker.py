@@ -186,3 +186,8 @@ def check_amazon_prices():
                 print(f"Errore durante lo scraping di {prodotto['nome']}: {e}")
             
             time.sleep(random.uniform(5, 10))
+            
+if __name__ == "__main__":
+    print("Avvio scansione singola prodotti per GitHub Actions...")
+    check_amazon_prices()
+    print("Scansione completata.")
