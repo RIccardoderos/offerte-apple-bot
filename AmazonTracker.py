@@ -29,7 +29,7 @@ PRODOTTI_APPLE = [
     {
         "nome": "PS5 con 2 controller",
         "url": "https://www.amazon.it/dp/B0CLT54ZNZ",
-        "prezzo_target": 400.00
+        "prezzo_target": 900.00
     }
 ]
 
