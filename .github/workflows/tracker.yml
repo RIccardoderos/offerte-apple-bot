@@ -3,7 +3,7 @@ name: Amazon Price Tracker
 on:
   schedule:
     # Esegue lo script automaticamente ogni 5 minuti
-    - cron: '*/7 * * * *'
+    - cron: '*/10 * * * *'
   # Permette di avviarlo anche manualmente quando vuoi
   workflow_dispatch:
 
