@@ -57,6 +57,59 @@ def pulisci_prezzo(testo):
     except ValueError:
         return None
 
+def imposta_posizione_italia(session, headers):
+    """Carica il widget modale del CAP di Amazon.it e imposta 33100 con il token CSRF reale."""
+    try:
+        home = session.get("https://www.amazon.it/", headers=headers, timeout=15)
+        time.sleep(random.uniform(1, 2))
+
+        # Carica il popup "Scegli la tua posizione" per ottenere il vero anti-csrftoken-a2z
+        popover_headers = headers.copy()
+        popover_headers.update({
+            "Accept": "text/html,*/*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.amazon.it/"
+        })
+        popover = session.get(
+            "https://www.amazon.it/portal-migration/hz/glow/get-rendered-address-selections?deviceType=desktop&pageType=Gateway&storeContext=NoStoreName&actionSource=desktop-modal",
+            headers=popover_headers,
+            timeout=15
+        )
+        token_match = re.search(r'CSRF_TOKEN\s*:\s*"([^"]+)"', popover.text)
+        if not token_match:
+            token_match = re.search(r'"anti-csrftoken-a2z"\s*:\s*"([^"]+)"', popover.text)
+
+        if token_match:
+            post_headers = headers.copy()
+            post_headers.update({
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                "Origin": "https://www.amazon.it",
+                "Referer": "https://www.amazon.it/",
+                "X-Requested-With": "XMLHttpRequest",
+                "anti-csrftoken-a2z": token_match.group(1)
+            })
+            payload = {
+                "locationType": "LOCATION_INPUT",
+                "zipCode": "33100",
+                "storeContext": "generic",
+                "deviceType": "web",
+                "pageType": "Gateway",
+                "actionSource": "glow"
+            }
+            res = session.post(
+                "https://www.amazon.it/portal-migration/hz/glow/address-change?actionSource=glow",
+                data=payload,
+                headers=post_headers,
+                timeout=15
+            )
+            print(f"Impostazione CAP 33100: HTTP {res.status_code}")
+            time.sleep(random.uniform(1, 2))
+        else:
+            print("Token CSRF posizione non trovato nel modale.")
+    except Exception as e:
+        print(f"Errore impostazione CAP: {e}")
+
 def estrai_prezzo_pagina(soup):
     selettori = [
         "#corePriceDisplay_desktop_feature_div span.a-price span.a-offscreen",
@@ -64,7 +117,9 @@ def estrai_prezzo_pagina(soup):
         "#tp_price_block_total_price_ww span.a-offscreen",
         ".apexPriceToPay span.a-offscreen",
         "#price_inside_buybox",
-        "#newBuyBoxPrice"
+        "#newBuyBoxPrice",
+        "#olp_feature_div span.a-color-price",
+        "#fod-cx-box span.a-price span.a-offscreen"
     ]
     for selettore in selettori:
         elemento = soup.select_one(selettore)
@@ -84,22 +139,6 @@ def estrai_prezzo_pagina(soup):
                 return valore
     return None
 
-def estrai_prezzo_ricerca_asin(session, asin, headers):
-    """Aggira il blocco geografico USA sui prodotti Apple leggendo il prezzo dalla ricerca per ASIN."""
-    search_url = f"https://www.amazon.it/s?k={asin}"
-    resp = session.get(search_url, headers=headers, timeout=15)
-    if resp.status_code != 200:
-        return None
-
-    soup = BeautifulSoup(resp.content, "html.parser")
-    # Cerca il blocco risultato con l'attributo data-asin esatto
-    card = soup.select_one(f'div[data-asin="{asin}"]')
-    if card:
-        prezzo_el = card.select_one("span.a-price span.a-offscreen")
-        if prezzo_el:
-            return pulisci_prezzo(prezzo_el.text)
-    return None
-
 def check_amazon_prices():
     headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -108,20 +147,14 @@ def check_amazon_prices():
     }
 
     with requests.Session(impersonate="chrome") as session:
+        imposta_posizione_italia(session, headers)
+
         for prodotto in PRODOTTI_APPLE:
             print(f"Controllo in corso per: {prodotto['nome']}...")
-            asin_match = re.search(r'/dp/([A-Z0-9]{10})', prodotto["url"])
-            asin = asin_match.group(1) if asin_match else ""
-
             try:
                 response = session.get(prodotto["url"], headers=headers, timeout=15)
                 soup = BeautifulSoup(response.content, "html.parser")
                 current_price = estrai_prezzo_pagina(soup)
-
-                # Se Amazon nasconde il prezzo Apple nella pagina prodotto (IP USA), legge dalla ricerca ASIN
-                if current_price is None and asin:
-                    time.sleep(random.uniform(2, 4))
-                    current_price = estrai_prezzo_ricerca_asin(session, asin, headers)
 
                 if current_price is not None:
                     print(f"[{time.strftime('%H:%M:%S')}] Prezzo attuale: {current_price}€ (Target: {prodotto['prezzo_target']}€)")
@@ -135,8 +168,12 @@ def check_amazon_prices():
                         )
                         send_telegram_message(msg)
                 else:
-                    page_title = soup.title.string.strip() if soup.title and soup.title.string else "Senza titolo"
-                    print(f"Prezzo non trovato per {prodotto['nome']} (HTTP {response.status_code} - Titolo: {page_title}).")
+                    # Diagnostica precisa per capire cosa vede Amazon sulla pagina
+                    cap_attuale = soup.select_one("#glow-ingress-line2")
+                    cap_str = cap_attuale.get_text(strip=True) if cap_attuale else "Sconosciuto"
+                    avail = soup.select_one("#availability")
+                    avail_str = avail.get_text(" ", strip=True)[:80] if avail else "Box disponibilità assente"
+                    print(f"Prezzo non trovato per {prodotto['nome']} | Posizione rilevata: '{cap_str}' | Stato: '{avail_str}'")
                     
             except Exception as e:
                 print(f"Errore durante lo scraping di {prodotto['nome']}: {e}")
