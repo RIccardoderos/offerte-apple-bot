@@ -149,6 +149,43 @@ def scarica_pagina(session, url, headers, tentativi=3):
     return response, html, True
 
 
+CAP = os.environ.get('CAP', '20121')  # CAP di consegna da simulare (impostalo come variabile/secret)
+
+
+def imposta_posizione(session, headers, cap=CAP):
+    """Prova a impostare un CAP italiano come indirizzo di consegna (best effort, non garantito)."""
+    try:
+        r = session.get("https://www.amazon.it/", headers=headers, timeout=20)
+        m = (re.search(r'anti-csrftoken-a2z&quot;:&quot;([^&]+)&quot;', r.text)
+             or re.search(r'"anti-csrftoken-a2z"\s*:\s*"([^"]+)"', r.text))
+        if not m:
+            print("Posizione: token CSRF non trovato, salto l'impostazione del CAP.")
+            return
+        h = dict(headers)
+        h.update({
+            "anti-csrftoken-a2z": m.group(1),
+            "Content-Type": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://www.amazon.it",
+            "Referer": "https://www.amazon.it/",
+        })
+        payload = {
+            "locationType": "LOCATION_INPUT",
+            "zipCode": cap,
+            "storeContext": "generic",
+            "deviceType": "web",
+            "pageType": "Gateway",
+            "actionSource": "glow",
+        }
+        r2 = session.post(
+            "https://www.amazon.it/portal-migration/hz/glow/address-change?actionSource=glow",
+            headers=h, json=payload, timeout=20
+        )
+        print(f"Posizione: impostazione CAP {cap} -> HTTP {r2.status_code}")
+    except Exception as e:
+        print(f"Posizione: errore nell'impostare il CAP: {e}")
+
+
 def check_amazon_prices():
     headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -157,6 +194,9 @@ def check_amazon_prices():
     }
 
     with requests.Session(impersonate="chrome") as session:
+        imposta_posizione(session, headers)
+        time.sleep(random.uniform(2, 4))
+
         for i, prodotto in enumerate(PRODOTTI_APPLE):
             print(f"Controllo in corso per: {prodotto['nome']}...")
             try:
@@ -184,8 +224,10 @@ def check_amazon_prices():
                         titolo = soup.title.get_text(strip=True) if soup.title else "nessun titolo"
                         avail = soup.select_one("#availability")
                         avail_str = avail.get_text(" ", strip=True)[:80] if avail else "Box disponibilità assente"
+                        loc = soup.select_one("#glow-ingress-line2")
+                        loc_str = loc.get_text(strip=True) if loc else "Sconosciuta"
                         print(f"Prezzo non trovato per {prodotto['nome']} | HTTP {response.status_code} | "
-                              f"Titolo: '{titolo[:60]}' | Stato: '{avail_str}'")
+                              f"Posizione: '{loc_str}' | Titolo: '{titolo[:60]}' | Stato: '{avail_str}'")
 
                 # Salva l'HTML per capire cosa riceve davvero lo script (utile su GitHub Actions)
                 if bloccata or (not bloccata and current_price is None):
